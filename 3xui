@@ -1,8 +1,14 @@
 #!/bin/bash
 set -e
 
-# ===== 可改参数（不改也能用）=====
-DOMAIN="example.com"
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+echo -e "${GREEN}=== 3x-ui 一键部署（最终稳定版） ===${NC}"
+
+# ===== 配置（直接改这里）=====
+DOMAIN="laizanbao.cc.cd"
 EMAIL="admin@$DOMAIN"
 PANEL_PORT="33130"
 PANEL_PATH="$(openssl rand -hex 8)"
@@ -10,47 +16,67 @@ USERNAME="admin"
 PASSWORD="123456"
 SSL_DIR="/etc/nginx/ssl"
 
-echo "=== 3x-ui 自动部署 ==="
-
-# root 检查
+# ===== root 检查 =====
 [ "$EUID" -ne 0 ] && echo "请用 root 运行" && exit 1
 
-# 安装依赖
+# ===== 安装依赖 =====
 apt update
 apt install -y curl socat nginx ufw dnsutils openssl
 
-# DNS 检测
+# ===== 获取本机IP =====
 IP=$(curl -s ifconfig.me)
+
+# ===== DNS检测（增强版）=====
+echo ">>> 检测域名解析..."
+
 DOMAIN_IP=$(dig +short $DOMAIN | head -n1)
 
-if [ "$IP" != "$DOMAIN_IP" ]; then
-    echo "域名未解析到本机"
-    exit 1
+if [ -z "$DOMAIN_IP" ]; then
+    echo -e "${RED}⚠️ 无法获取 DNS，可能未生效，继续尝试...${NC}"
+else
+    echo "本机IP: $IP"
+    echo "解析IP: $DOMAIN_IP"
+
+    if [ "$IP" != "$DOMAIN_IP" ]; then
+        echo -e "${RED}⚠️ DNS不一致，仍继续执行（可能刚解析）${NC}"
+    fi
 fi
 
-# Cloudflare 检测
+# ===== Cloudflare 检测 =====
 if curl -sI http://$DOMAIN | grep -qi cloudflare; then
-    echo "检测到 Cloudflare，请关闭小黄云再运行"
+    echo -e "${RED}❌ 检测到 Cloudflare 代理，请先关闭小黄云${NC}"
     exit 1
 fi
 
-# 安装 acme
+# ===== 安装 acme =====
+echo ">>> 安装 acme.sh"
 rm -rf ~/.acme.sh
 curl https://get.acme.sh | sh -s email=$EMAIL
 ACME="$HOME/.acme.sh/acme.sh"
 
+# ===== 停 nginx =====
 systemctl stop nginx || true
 
-# 申请证书
-$ACME --issue -d $DOMAIN --standalone --ecc --force
+# ===== 申请证书 =====
+echo ">>> 申请 SSL 证书..."
+$ACME --issue -d $DOMAIN --standalone --ecc --force || {
+    echo -e "${RED}❌ 证书申请失败${NC}"
+    exit 1
+}
 
+# ===== 安装证书 =====
 mkdir -p $SSL_DIR
 
 $ACME --install-cert -d $DOMAIN --ecc \
 --key-file $SSL_DIR/panel.key \
 --fullchain-file $SSL_DIR/panel.crt
 
-# Nginx 配置
+chmod 600 $SSL_DIR/panel.key
+chmod 644 $SSL_DIR/panel.crt
+
+# ===== Nginx 配置 =====
+echo ">>> 配置 Nginx"
+
 cat > /etc/nginx/conf.d/panel.conf <<EOF
 server {
     listen 80;
@@ -67,17 +93,26 @@ server {
 
     location /$PANEL_PATH/ {
         proxy_pass http://127.0.0.1:$PANEL_PORT/;
+
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+
         proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
     }
 }
 EOF
 
 nginx -t && systemctl start nginx
 
-# 安装 3x-ui
+# ===== 安装 3x-ui =====
+echo ">>> 安装 3x-ui"
 bash <(curl -Ls https://raw.githubusercontent.com/mhsanaei/3x-ui/master/install.sh) <<< "y"
 
-# 配置面板
+# ===== 配置面板 =====
+echo ">>> 配置面板"
+
 x-ui setting -reset
 x-ui setting -username "$USERNAME"
 x-ui setting -password "$PASSWORD"
@@ -87,15 +122,16 @@ x-ui setting -ip 127.0.0.1
 
 systemctl restart x-ui
 
-# 防火墙
+# ===== 防火墙 =====
 ufw allow 80/tcp
 ufw allow 443/tcp
 ufw allow OpenSSH
 ufw --force enable
 
-echo "=================================="
-echo "完成:"
-echo "https://$DOMAIN/$PANEL_PATH/"
-echo "账号: $USERNAME"
-echo "密码: $PASSWORD"
-echo "=================================="
+# ===== 完成 =====
+echo -e "${GREEN}====================================${NC}"
+echo -e "✅ 部署完成"
+echo -e "🌍 https://$DOMAIN/$PANEL_PATH/"
+echo -e "👤 $USERNAME"
+echo -e "🔑 $PASSWORD"
+echo -e "${GREEN}====================================${NC}"
